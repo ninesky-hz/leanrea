@@ -1,13 +1,13 @@
 # leanrea
 
-**One 8 KB skill file that does what [REA](https://github.com/morluto/rea) does: no MCP server, no 207 tools, no setup.**
+**One 18 KB skill file that does what [REA](https://github.com/morluto/rea) does: no MCP server, no 207 tools, no setup.**
 
 REA (Reverse Engineer Anything) puts an MCP layer between your agent and tools it can already use: asar, otool, nm, `go version -m`, jadx, apktool, Ghidra, tshark, binwalk, sqlite3. leanrea drops that layer. It tells the agent which command is fastest for each kind of target, gives it ready-to-paste recon commands, and lists the traps that REA's code handles for you. The agent then runs the real tools itself.
 
 |  | REA 6.5.0 | leanrea |
 |---|---|---|
 | What gets installed | 25 MB npm package + MCP server | one `SKILL.md` |
-| Instructions | 23.5 KB skill + 48.8 KB references | 8 KB |
+| Instructions | 23.5 KB skill + 48.8 KB references | 18 KB |
 | Tools added to the agent | 207 (3.35 MB of definitions) | 0 (uses Bash) |
 | Context for "Reply OK", all tools loaded | 400.7k tokens, $1.60 | 34.5k tokens, $0.09 |
 
