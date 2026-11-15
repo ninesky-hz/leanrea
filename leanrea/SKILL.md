@@ -15,6 +15,7 @@ You already know these tools. This file only lists the fastest command for each 
 - Batch independent probes into ONE shell call with `;` and `echo '--- name'` markers (quoted: zsh expands a bare `==x`). Cap every output with `head` or `-m`.
 - Answer from evidence. In the answer, mark each claim as **seen** (cite file:offset, or a symbol/string) or **inferred**. A fact you did not find is **unknown**, not "absent". Static reading is not observed execution.
 - A missing tool is not a blocker. Use the fallback in the same row, or `brew install <x>` if the user allows it.
+- On Windows: see the last section. Run the mac/Linux recipes through Git Bash (bash.exe -lc) instead of translating them.
 - Turns cost more than bytes. Aim for 2–4 tool calls: one batched recon call, one or two targeted slices, then answer. Stop when every item you were asked has evidence. Do not re-verify what you already saw.
 
 ## First move: one call each, paste and run
@@ -64,3 +65,54 @@ Go: `go version -m T` alone usually answers the question.
 
 ## Install (only on request)
 `brew install jadx apktool radare2 binwalk wabt wireshark ghidra` · `npm i -g @electron/asar` · `dotnet tool install -g ilspycmd` · `cargo install cargo-audit`.
+
+## Windows (PowerShell 5.1 / 7, cmd)
+
+Best single move: run the recipes through Git Bash instead of translating them —
+`& 'C:\Program Files\Git\bin\bash.exe' -lc 'file -b T; strings -a -n 6 T | head -400'`.
+Git for Windows ships real `file`, `strings`, `awk`, `head`, `sed`, `tr`; `C:\msys64\ucrt64\bin` adds `objdump`, `readelf`, `sqlite3`. Use WSL (`wsl -e bash -lc '...'`) for `binwalk`/`unblob` and for Mach-O re-signing.
+
+| mac/Linux | Windows replacement |
+|---|---|
+| `file -b T` | `& 'C:\Program Files\Git\usr\bin\file.exe' -b T`; else PS7 `Format-Hex -Path T -Count 16`, PS5.1 `([IO.File]::ReadAllBytes($T))[0..15] \| %{ $_.ToString('X2') }` |
+| `strings -a -n 6` | `strings.exe -a -n 6 T` (Git/msys) or `rg -a -o '[\x20-\x7E]{6,}' T` |
+| `head` / `awk` / `sed` / `tr` | `Select-Object -First N`, or run the pipe in Git Bash |
+| `nm -gU` / `nm -u` | `llvm-nm --defined-only --extern-only T` / `llvm-nm --undefined-only T` |
+| `otool -L` / `otool -tV` | `llvm-objdump --macho --dylibs-used T` / `llvm-objdump --macho --disassemble --no-show-raw-insn -C T > dis.txt` |
+| `lipo -info` | `llvm-lipo -info T` |
+| `readelf` / `objdump` | `llvm-readelf -hlSW`, `llvm-objdump -d -M intel` |
+| `$TMPDIR` | `$env:TEMP` |
+| `cp -c` (APFS clone) | no clone; `Copy-Item`, `robocopy /B` for locked files |
+
+PE / native Windows target, one call:
+
+```powershell
+$T='.\bin\app.exe'; $D="$env:TEMP\re\$((Get-Item $T).BaseName)"; New-Item -ItemType Directory -Force $D | Out-Null
+Format-Hex -Path $T -Count 16
+llvm-objdump -p $T | Select-String 'DLL Name|Subsystem|Time/Date'     # import map without dumpbin
+llvm-readobj --coff-exports $T | Select-Object -First 80
+rg -a -o '[\x20-\x7E]{6,}' $T | Select-Object -First 400
+```
+
+`dumpbin` exists only inside a Visual Studio Developer shell. Without LLVM either, `python -c "import pefile;pe=pefile.PE('T');print([e.dll for e in pe.DIRECTORY_ENTRY_IMPORT])"` is the cheapest capability map.
+
+Wrappers you meet on Windows, and the unwrap:
+- Electron: `resources\app.asar` beside the exe — every Router row applies unchanged. No `jq`? `node -e "const p=require('./package.json');console.log(p.name,p.version,p.main)"`.
+- NSIS installer: `7z x setup.exe -oX`, then `X\$PLUGINSDIR\app-64.7z`.
+- Inno Setup: `innoextract -e -d X setup.exe`.
+- MSI: `lessmsi x setup.msi X\` or `msiexec /a setup.msi /qb TARGETDIR=X`.
+- MSIX / APPX: `makeappx unpack /p p.msix /d X` (Windows SDK) or `7z x`.
+- .NET: `ilspycmd -p -o X T.dll` (cross-platform `dotnet tool`); dnSpyEx when you must debug a live assembly.
+
+Runtime: Procmon for file/registry (`procmon /AcceptEula /Quiet /Minimized`), `procdump -ma PID d.dmp` then `cdb -z d.dmp`, x64dbg for native, Electron main `--inspect`, `adb` identical to macOS.
+
+Traps:
+- Windows PowerShell 5.1 aliases `curl`/`wget` to `Invoke-WebRequest`; call `curl.exe`.
+- Put `rg` patterns in single quotes: double quotes expand `$` and backtick.
+- `.` is not on `PATH`: `.\tool.exe`. If bare `rg` is missing, DSH ships one at `D:\DeepSeek Harness\resources\app\dsh\node_modules\@vscode\ripgrep-win32-x64\bin\rg.exe`.
+- A running exe locks on write but reads fine; extract to `$env:TEMP` and never analyze in `C:\Program Files`.
+- Windows bundles store `\\` and `C:/` literals: search both `C:\\` and `C:/`.
+- Long paths: prefix `\\?\` when a tool truncates.
+- `Format-Hex -Count` / `Get-Content -AsByteStream` need PS7; PS5.1 uses `-Encoding Byte` or `[IO.File]::ReadAllBytes`.
+
+Install (only on request): `winget install LLVM.LLVM Git.Git BurntSushi.ripgrep.MSVC WiresharkFoundation.Wireshark` · `choco install jadx apktool ghidra 7zip lessmsi innoextract jq` · `dotnet tool install -g ilspycmd` · `binwalk`/`unblob` via `wsl`.
