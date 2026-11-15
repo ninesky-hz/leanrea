@@ -70,7 +70,7 @@ Go: `go version -m T` alone usually answers the question.
 
 Best single move: run the recipes through Git Bash instead of translating them —
 `& 'C:\Program Files\Git\bin\bash.exe' -lc 'file -b T; strings -a -n 6 T | head -400'`.
-Git for Windows ships real `file`, `strings`, `awk`, `head`, `sed`, `tr`; `C:\msys64\ucrt64\bin` adds `objdump`, `readelf`, `sqlite3`. Use WSL (`wsl -e bash -lc '...'`) for `binwalk`/`unblob` and for Mach-O re-signing.
+Git for Windows ships real `file`, `strings`, `awk`, `head`, `sed`, `tr`; `C:\msys64\ucrt64\bin` adds `objdump`, `readelf`, `sqlite3`. Use WSL (`wsl -e bash -lc '...'`) for `binwalk`/`unblob` for re-signing Mach-O; static Mach-O parsing needs no WSL - see the Mach-O section below.
 
 | mac/Linux | Windows replacement |
 |---|---|
@@ -116,3 +116,94 @@ Traps:
 - `Format-Hex -Count` / `Get-Content -AsByteStream` need PS7; PS5.1 uses `-Encoding Byte` or `[IO.File]::ReadAllBytes`.
 
 Install (only on request): `winget install LLVM.LLVM Git.Git BurntSushi.ripgrep.MSVC WiresharkFoundation.Wireshark` · `choco install jadx apktool ghidra 7zip lessmsi innoextract jq` · `dotnet tool install -g ilspycmd` · `binwalk`/`unblob` via `wsl`.
+
+## Mach-O on Windows (no codesign, no otool)
+
+`llvm-objdump --macho` is a container parser: it walks load commands and never verifies a signature, so ad-hoc, expired, revoked or hand-patched binaries read exactly like pristine ones. Nothing here needs `codesign`, a keychain, or a Mac — the signature is just bytes at `LC_CODE_SIGNATURE`.
+
+Zero-install first (works with only Git for Windows + python):
+
+```sh
+T=lib.dylib
+file -b "$T"                                   # thin/universal, arch, MH_ type
+strings -a "$T" | rg -m6 'com\.apple\.security|application-identifier|Entitlements|get-task-allow'
+python sig.py "$T"                             # identifier, team, flags, cdhash, entitlements
+```
+
+`sig.py` — paste once, ~40 lines, stdlib only, thin + fat (exits verified against a linker-signed arm64 dylib, an unsigned x86_64 dylib and a fat wrapper):
+
+```python
+import struct, sys, plistlib, hashlib
+
+d = open(sys.argv[1], 'rb').read()
+
+def slices(b):
+    if struct.unpack('>I', b[:4])[0] in (0xCAFEBABE, 0xBEBAFECA):
+        for i in range(struct.unpack('>I', b[4:8])[0]):
+            cpu, sub, off, size, _ = struct.unpack('>5I', b[8+20*i:28+20*i])
+            yield {0x01000007: 'x86_64', 0x0100000C: 'arm64'}.get(cpu, hex(cpu)), b[off:off+size]
+    else:
+        yield 'thin', b
+
+for arch, s in slices(d):
+    sig = None
+    bits = 32 if struct.unpack('<I', s[:4])[0] == 0xFEEDFACE else 64
+    p = 32 if bits == 64 else 28
+    for _ in range(struct.unpack('<I', s[16:20])[0]):          # walk load commands
+        cmd, size = struct.unpack('<II', s[p:p+8])
+        if cmd == 0x1D:                                        # LC_CODE_SIGNATURE
+            sig = struct.unpack('<II', s[p+8:p+16])            # dataoff, datasize
+        p += size
+    print('==', arch, bits, 'bit')
+    if not sig:
+        print('  unsigned')
+        continue
+    off = sig[0]
+    if struct.unpack('>I', s[off:off+4])[0] != 0xFADE0CC0:     # superblob (big-endian)
+        print('  no embedded signature')
+        continue
+    bl = {}
+    for i in range(struct.unpack('>I', s[off+8:off+12])[0]):
+        t, o = struct.unpack('>II', s[off+12+8*i:off+20+8*i])
+        bl[t] = off + o                                        # slot offsets are superblob-relative
+    if 0 in bl:                                                # CodeDirectory
+        q = bl[0]; cl = struct.unpack('>I', s[q+4:q+8])[0]; cd = s[q:q+cl]
+        ver, fl, ho, io, ns, nc, lim = struct.unpack('>7I', cd[8:36])
+        print('  cd v%#x flags %#x cdhash %s' % (ver, fl, hashlib.sha256(cd).hexdigest()[:40]))
+        if io:
+            print('  ident', cd[io:cd.index(b'\0', io)].decode())
+        if ver >= 0x20200 and struct.unpack('>I', cd[48:52])[0]:   # teamOffset needs v>=0x20200
+            to = struct.unpack('>I', cd[48:52])[0]
+            print('  team', cd[to:cd.index(b'\0', to)].decode())
+    if 5 in bl:                                                # XML entitlements
+        q = bl[5]; l = struct.unpack('>I', s[q+4:q+8])[0]
+        for k, v in sorted(plistlib.loads(s[q+8:q+l]).items()):
+            print('  %s = %r' % (k, v))
+```
+
+Output shape: `cd v0x20400 flags 0x2 cdhash 707f888a…`, then `ident`/`team`, then one `key = value` per entitlement.
+
+With LLVM installed (`winget install LLVM.LLVM`, or `scoop install llvm`):
+
+| Need | Command |
+|---|---|
+| all load commands | `llvm-objdump --macho --all-headers T` |
+| signature location | `llvm-objdump --macho --private-headers T \| rg -A2 LC_CODE_SIGNATURE` → `dataoff` / `datasize` |
+| linked dylibs | `llvm-objdump --macho --dylibs-used T` |
+| exported symbols | `llvm-objdump --macho --exports-trie T` |
+| ObjC classes/methods | `llvm-objdump --macho --objc-meta-data T` |
+| embedded Info.plist | `llvm-objdump --macho --info-plist T` (only when `__TEXT,__info_plist` exists) |
+| rpaths / fixups / binds | `--macho --rpaths` · `--macho --chained-fixups` · `--macho --bind` / `--lazy-bind` / `--weak-bind` / `--rebase` |
+| function starts | `llvm-objdump --macho --function-starts=names T` |
+| fat slices | `llvm-objdump --macho --universal-headers T`; then `--arch=arm64` |
+| disassembly | `llvm-objdump -d --no-show-raw-insn -C T > dis.txt`, then `--dis-symname=_main` |
+
+Layout traps (each one cost a debug round while writing the parser above):
+- Everything inside the superblob is **big-endian**, while the Mach-O header and load commands are little-endian.
+- Slot offsets are relative to the **superblob start**, not the file.
+- CodeDirectory header length depends on the version: 44 bytes below `0x20100`, 48 with `scatterOffset` (`>=0x20100`), 52 with `teamOffset` (`>=0x20200`). Fixed-offset reads return empty identifier/team.
+- `identOffset`/`teamOffset` point from the CD start, past the header; the strings are NUL-terminated.
+- `cdhash` is the first 20 bytes of the CD digest (`sha256` truncated, or a full `sha1`); flags `0x2` adhoc, `0x4` get-task-allow, `0x100` hard, `0x200` kill, `0x800` restrict, `0x10000` runtime, `0x20000` linker-signed.
+- Slot 5 is the XML plist under an 8-byte `0xFADE7171` header. Slot 7 (`0xFADE7172`) is DER entitlements: dump that blob and `openssl asn1parse -inform DER -in slot7.bin`.
+- Fat slices carry slice-relative offsets, so slice before parsing; never assume the thin header sits at file offset 0.
+- A toolchain-built dylib is commonly **linker-signed** (`0x20000|0x2`) or fully unsigned — no slot 5 means "no entitlements blob", not "privileges absent".
